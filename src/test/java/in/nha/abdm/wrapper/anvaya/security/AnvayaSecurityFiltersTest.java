@@ -97,7 +97,11 @@ class AnvayaSecurityFiltersTest {
     String t = token(gatewayKey, new Date(System.currentTimeMillis() + 60_000));
     assertEquals(
         200,
-        run(gatewayFilter, "POST", "/api/v3/consent/request/hip/notify", "Authorization",
+        run(
+            gatewayFilter,
+            "POST",
+            "/api/v3/consent/request/hip/notify",
+            "Authorization",
             "Bearer " + t));
   }
 

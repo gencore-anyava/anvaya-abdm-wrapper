@@ -42,8 +42,7 @@ public class GatewayJwtFilter extends OncePerRequestFilter {
     DefaultJWTProcessor<SecurityContext> processor = new DefaultJWTProcessor<>();
     processor.setJWSKeySelector(
         new JWSVerificationKeySelector<>(
-            Set.of(
-                JWSAlgorithm.RS256, JWSAlgorithm.RS384, JWSAlgorithm.RS512, JWSAlgorithm.PS256),
+            Set.of(JWSAlgorithm.RS256, JWSAlgorithm.RS384, JWSAlgorithm.RS512, JWSAlgorithm.PS256),
             keySource));
     // DefaultJWTProcessor's default claims verifier rejects expired / not-yet-valid tokens.
     this.jwtProcessor = processor;
@@ -84,8 +83,10 @@ public class GatewayJwtFilter extends OncePerRequestFilter {
       return null;
     }
     String h = header.trim();
-    if (h.regionMatches(true, 0, "Bearer ", 0, 7)) {
-      h = h.substring(7).trim();
+    // Match the "Bearer" scheme even when nothing follows it ("Bearer " trims to "Bearer").
+    if (h.regionMatches(true, 0, "Bearer", 0, 6)
+        && (h.length() == 6 || Character.isWhitespace(h.charAt(6)))) {
+      h = h.substring(6).trim();
     }
     return h.isEmpty() ? null : h;
   }
