@@ -45,8 +45,7 @@ public class RequestManager {
             .baseUrl(gatewayBaseUrl)
             .clientConnector(
                 new ReactorClientHttpConnector(sessionManager.getHttpClient(useProxySettings)))
-            .defaultHeaders(
-                httpHeaders -> httpHeaders.addAll(sessionManager.setGatewayRequestHeaders()))
+            // Anvaya: no token fetch at bean creation; headers are set per request.
             .build();
   }
 

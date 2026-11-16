@@ -17,6 +17,12 @@ services:
   abdm-wrapper:
     build: .
     image: abdm-wrapper
+    environment:
+      - MONGODB_URI=mongodb://mongodb:27017/abdm_wrapper
+      - FACADE_API_KEYS=${FACADE_API_KEYS:-local-dev-key}
+      - ABDM_CLIENT_ID=${ABDM_CLIENT_ID:-}
+      - ABDM_CLIENT_SECRET=${ABDM_CLIENT_SECRET:-}
+      - HIP_BASE_URL=http://sample-hip:8081
     ports:
       - '8082:8082'
     depends_on:

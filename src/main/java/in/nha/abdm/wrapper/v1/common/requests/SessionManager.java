@@ -1,14 +1,15 @@
 /* (C) 2024 */
 package in.nha.abdm.wrapper.v1.common.requests;
 
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import in.nha.abdm.wrapper.ApplicationConfig;
 import in.nha.abdm.wrapper.v1.common.Utils;
 import io.netty.channel.ChannelOption;
 import io.netty.handler.timeout.ReadTimeoutException;
-import io.netty.handler.timeout.TimeoutException;
 import java.text.MessageFormat;
 import java.time.Duration;
+import java.time.Instant;
 import java.util.UUID;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
@@ -18,9 +19,6 @@ import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.http.client.reactive.ReactorClientHttpConnector;
-import org.springframework.retry.annotation.Backoff;
-import org.springframework.retry.annotation.Retryable;
-import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 import org.springframework.web.client.HttpServerErrorException;
 import org.springframework.web.reactive.function.BodyInserters;
@@ -35,7 +33,14 @@ import reactor.util.retry.Retry;
 public class SessionManager {
 
   @Autowired ApplicationConfig applicationConfig;
-  private String accessToken;
+  private volatile String accessToken;
+  private volatile Instant accessTokenExpiresAt;
+
+  // Used when the gateway response has no "expiresIn". Upstream noted 20-minute tokens.
+  private static final long DEFAULT_TOKEN_TTL_SECONDS = 15 * 60;
+
+  @Value("${anvaya.session.refresh-skew-seconds:120}")
+  private long refreshSkewSeconds;
 
   @Value("${gatewayBaseUrl}")
   private String gatewayBaseUrl;
@@ -82,27 +87,56 @@ public class SessionManager {
     return headers;
   }
 
+  /**
+   * Anvaya: returns a valid token, refreshing it lazily when it is missing or within {@code
+   * refreshSkewSeconds} of expiry. Upstream relied on a 15-minute @Scheduled refresh, which does
+   * not fire reliably on Cloud Run when CPU is throttled between requests, so tokens went stale.
+   */
   private String fetchAccessToken() {
-    if (accessToken == null) {
-      try {
-        startSession();
-      } catch (Throwable e) {
-        throw new RuntimeException(e);
-      }
+    if (isTokenUsable()) {
+      return accessToken;
     }
-    return accessToken;
+    synchronized (this) {
+      if (!isTokenUsable()) {
+        try {
+          startSession();
+        } catch (Throwable e) {
+          throw new RuntimeException("Could not obtain ABDM gateway session", e);
+        }
+      }
+      return accessToken;
+    }
+  }
+
+  private boolean isTokenUsable() {
+    Instant expiry = accessTokenExpiresAt;
+    return accessToken != null
+        && expiry != null
+        && Instant.now().isBefore(expiry.minusSeconds(refreshSkewSeconds));
   }
 
   /**
-   * The accessToken expires at 20 minutes post creating, using this scheduler refreshing the
-   * accessToken every 15 minutes to avoid Unauthorized error.
+   * Anvaya: drop a token the gateway rejected (HTTP 401) so the next call opens a new session. Only
+   * clears it if it is still the current token, so a concurrent refresh is not thrown away.
    */
-  @Scheduled(initialDelay = 15 * 60 * 1000, fixedRate = 15 * 60 * 1000)
-  @Retryable(
-      value = {WebClientRequestException.class, ReadTimeoutException.class, TimeoutException.class},
-      maxAttempts = 5,
-      backoff = @Backoff(delay = 1000, multiplier = 2))
-  public void startSession() throws Throwable {
+  public synchronized void invalidateToken(String rejectedToken) {
+    if (rejectedToken != null && rejectedToken.equals(accessToken)) {
+      log.warn("Gateway rejected the session token; it will be refreshed on next use");
+      accessToken = null;
+      accessTokenExpiresAt = null;
+    }
+  }
+
+  /** Current "Bearer ..." header value (refreshing if needed). */
+  public String currentAuthorizationHeader() {
+    return fetchAccessToken();
+  }
+
+  /**
+   * Opens a gateway session and stores the token with its expiry (from "expiresIn", in seconds).
+   * Transient network/5xx errors are retried inside {@link #getSessionResponse}.
+   */
+  public synchronized void startSession() throws Throwable {
 
     CreateSessionRequest createSessionRequest =
         CreateSessionRequest.builder()
@@ -113,18 +147,21 @@ public class SessionManager {
     try {
 
       ResponseEntity<ObjectNode> responseEntity = getSessionResponse(createSessionRequest);
-      String accessTokenResponse =
-          MessageFormat.format(
-              "Bearer {0}", responseEntity.getBody().findValue("accessToken").asText());
-      if (accessTokenResponse != null) {
-        accessToken = accessTokenResponse;
-      } else {
-        log.error(
-            "Empty access token found"
-                + createSessionPath
-                + " : "
-                + responseEntity.getBody().toString());
+      ObjectNode body = responseEntity.getBody();
+      JsonNode tokenNode = body == null ? null : body.findValue("accessToken");
+      if (tokenNode == null || tokenNode.asText().isBlank()) {
+        // Do not log the body: it may contain credentials.
+        log.error("Empty access token in response from " + createSessionPath);
+        throw new IllegalStateException("Gateway session response had no accessToken");
       }
+      JsonNode expiresInNode = body.findValue("expiresIn");
+      long expiresIn =
+          expiresInNode != null && expiresInNode.asLong() > 0
+              ? expiresInNode.asLong()
+              : DEFAULT_TOKEN_TTL_SECONDS;
+      accessToken = MessageFormat.format("Bearer {0}", tokenNode.asText());
+      accessTokenExpiresAt = Instant.now().plusSeconds(expiresIn);
+      log.info("Gateway session opened; token valid for " + expiresIn + "s");
     } catch (Exception e) {
       log.error("Could not start gateway session: " + e);
       // This is to get actual exception wrapped under ReactiveException.

@@ -14,4 +14,5 @@ RUN gradle build -x test
 
 EXPOSE 8082
 
-ENTRYPOINT java -jar /app/build/libs/*-SNAPSHOT.jar --spring.data.mongodb.host=mongodb
+# Mongo connection comes from MONGODB_URI (see application.properties)
+ENTRYPOINT java -jar /app/build/libs/*-SNAPSHOT.jar
